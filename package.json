@@ -1,0 +1,6 @@
+{
+  "name": "price-compare-userscript",
+  "private": true,
+  "scripts": { "test": "node --test" },
+  "devDependencies": { "jsdom": "^26.1.0" }
+}
