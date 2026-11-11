@@ -69,6 +69,38 @@ test('a price split into ruble, kopeck and currency spans is still parsed', () =
   } finally { dom.window.close(); }
 });
 
+test('BEM sub-elements do not shred a Perekrestok card into fragments', () => {
+  const db = new Map();
+  const dom = openCustom(
+    '<div class="product-card"><div class="product-card__media"><a href="/product/golen">' +
+    '<img alt="Голень куриная Троекурово охлаждённая, 900г"></a></div>' +
+    '<div class="product-card__title">Голень куриная Троекурово охлаждённая, 900г</div>' +
+    '<div class="product-card__price">406,99 ₽</div></div>',
+    'https://www.perekrestok.ru/catalog', db);
+  try {
+    const offers = [...db.entries()].filter(([key]) => key.startsWith('pc_offer_v1:')).map(([, value]) => value);
+    assert.equal(offers.length, 1);
+    assert.equal(offers[0].name, 'Голень куриная Троекурово охлаждённая, 900г');
+    assert.equal(offers[0].price, 406.99);
+  } finally { dom.window.close(); }
+});
+
+test('fallback assembles a deep card whose only action is a button', () => {
+  const db = new Map();
+  const dom = openCustom(
+    '<section><div><img alt="Молоко Домик в деревне 1 л"><div><div><div><div><div><div>' +
+    '<span>199 ₽</span></div></div></div></div></div></div><button>В корзину</button></div></section>',
+    'https://5ka.ru/catalog', db);
+  try {
+    const offers = [...db.entries()].filter(([key]) => key.startsWith('pc_offer_v1:')).map(([, value]) => value);
+    assert.equal(offers.length, 1);
+    assert.equal(offers[0].price, 199);
+    const report = getReport({ w: dom.window });
+    assert.equal(report.lastScan.cardSource, 'fallback');
+    assert.ok(report.lastScan.fallbackSamples.includes('199 ₽'));
+  } finally { dom.window.close(); }
+});
+
 test('the panel lists collected offers so the user can inspect and copy them', () => {
   const db = new Map();
   const tab = openTab('https://5ka.ru/catalog', 100, db);

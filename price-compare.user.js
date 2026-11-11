@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Сравнение цен: Пятёрочка, Перекрёсток, Ozon
 // @namespace    x5club-ozonfresh-price-compare
-// @version      1.4.1
+// @version      1.4.2
 // @description  Сохраняет увиденные товары и осторожно сравнивает цены между магазинами
 // @match        https://5ka.ru/*
 // @match        https://*.5ka.ru/*
@@ -161,7 +161,7 @@
     perekrestok: '.product-card, [data-testid*="product-card" i], [class*="product-card" i], [class*="ProductCard"]',
     ozon: '.tile-root, [class*="tile-root" i]'
   };
-  const VERSION = '1.4.1';
+  const VERSION = '1.4.2';
   const LOG_FULL = 'pc_log_full_v1:';
   const LOG_ARCHIVE = 'pc_log_archive_v1:';
   const MAX_LOG_BYTES = 256 * 1024; // Estimated UTF-16 bytes, per session.
@@ -394,7 +394,11 @@
   function getCards(stats) {
     let cards = [...document.querySelectorAll(selectors[store])];
     stats.selectorNodes = cards.length;
-    cards = cards.filter(card => !cards.some(other => card !== other && card.contains(other)));
+    // Keep the outermost match, not the innermost: BEM markup nests elements
+    // like product-card__price inside product-card, and keeping the innermost
+    // match shredded every Perekrestok card into nameless, priceless fragments
+    // (a live report showed 81 "cards" with neither name nor price).
+    cards = cards.filter(card => !cards.some(other => card !== other && other.contains(card)));
     // Fallback is deliberately limited to ancestors of plausible price elements.
     if (cards.length) { stats.cardSource = 'selector'; return cards; }
     stats.cardSource = 'fallback';
@@ -402,14 +406,18 @@
     for (const el of document.querySelectorAll('span,div,p')) {
       if (el.closest('.pc-badge, #pc-panel')) continue;
       const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      // Keep a few raw price-like texts so a report shows the price format of
+      // a store whose cards do not assemble yet (Pyaterochka at the moment).
+      if (text.length <= 80 && /₽|руб/i.test(text) && stats.fallbackSamples.length < 5 && !stats.fallbackSamples.includes(text)) stats.fallbackSamples.push(text);
       if (text.length > 35) continue;
       if (/₽|руб/i.test(text)) stats.fallbackCurrencyNodes++;
       if (!parsePrice(text)) continue;
       stats.fallbackParsedPriceNodes++;
       let node = el;
-      for (let i = 0; i < 6 && node && node !== document.body; i++, node = node.parentElement) {
+      for (let i = 0; i < 10 && node && node !== document.body; i++, node = node.parentElement) {
         if ((node.textContent.match(/₽/g) || []).length > 4) break;
-        if (node.querySelector('img') && node.querySelector('a[href]')) { found.add(node); break; }
+        // Clickable cards may have a button instead of a product link.
+        if (node.querySelector('img') && node.querySelector('a[href], button')) { found.add(node); break; }
       }
     }
     return [...found];
@@ -545,7 +553,7 @@
     logEvent('scan_started', { scanId });
     const started = Date.now();
     const stats = { phase: 'storage', selectorNodes: 0, cardSource: 'not_started', cards: 0,
-      fallbackCurrencyNodes: 0, fallbackParsedPriceNodes: 0,
+      fallbackCurrencyNodes: 0, fallbackParsedPriceNodes: 0, fallbackSamples: [],
       noName: 0, noPrice: 0, parsed: 0, saved: 0, unchanged: 0, rejected: 0,
       jsonScripts: 0, jsonInvalid: 0, jsonTooLarge: 0, jsonProducts: 0, jsonOffers: 0,
       matchedCards: 0, shownCards: 0, offersByStore: {}, durationMs: 0 };
