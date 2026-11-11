@@ -5,7 +5,7 @@ const { JSDOM } = require('jsdom');
 const fs = require('node:fs');
 const script = fs.readFileSync(require.resolve('../price-compare.user.js'), 'utf8');
 
-function openTab(url, price, db, link = '/product/milk') {
+function openTab(url, price, db, link = '/product/milk', beforeEval = null) {
   const dom = new JSDOM(`<!doctype html><html><head></head><body><article class="product-card"><a ${link === null ? '' : `href="${link}"`}><img alt="Молоко Домик 1 л"></a><span class="price">${price} ₽</span></article></body></html>`, { url, runScripts: 'outside-only' });
   const w = dom.window;
   let interval;
@@ -15,6 +15,7 @@ function openTab(url, price, db, link = '/product/milk') {
   w.GM_listValues = () => [...db.keys()];
   w.setInterval = fn => { interval = fn; return 1; };
   w.confirm = () => true;
+  if (beforeEval) beforeEval(w);
   w.eval(script);
   return { w, dom, scan: () => interval() };
 }
@@ -242,6 +243,66 @@ test('storage pressure deletes old summaries but does not evict active full logs
   try {
     assert.equal(db.has('pc_log_archive_v1:old'), false);
     assert.equal(db.has('pc_log_full_v1:live'), true);
+  } finally { tab.dom.window.close(); }
+});
+
+test('a page-global module object does not silently stop the userscript', () => {
+  const tab = openTab('https://5ka.ru/catalog', 100, new Map(), '/product/milk', w => { w.module = { exports: {} }; });
+  try {
+    assert.ok(tab.w.document.querySelector('#pc-panel'));
+  } finally { tab.dom.window.close(); }
+});
+
+test('an unsupported site leaves a console trace and no panel', () => {
+  const messages = [];
+  const tab = openTab('https://example.com/catalog', 100, new Map(), '/product/milk', w => {
+    w.console.info = (...args) => messages.push(args.join(' '));
+  });
+  try {
+    assert.equal(tab.w.document.querySelector('#pc-panel'), null);
+    assert.ok(messages.some(text => text.includes('[Price Compare]') && text.includes('Неподдерживаемый сайт')));
+  } finally { tab.dom.window.close(); }
+});
+
+test('a supported site logs that the script started', () => {
+  const messages = [];
+  const tab = openTab('https://5ka.ru/catalog', 100, new Map(), '/product/milk', w => {
+    w.console.info = (...args) => messages.push(args.join(' '));
+  });
+  try {
+    assert.ok(tab.w.document.querySelector('#pc-panel'));
+    assert.ok(messages.some(text => text.includes('[Price Compare]') && text.includes('Скрипт запущен')));
+  } finally { tab.dom.window.close(); }
+});
+
+test('the panel still appears when the document has no head', () => {
+  const tab = openTab('https://5ka.ru/catalog', 100, new Map(), '/product/milk', w => { w.document.head.remove(); });
+  try {
+    assert.ok(tab.w.document.querySelector('#pc-panel'));
+  } finally { tab.dom.window.close(); }
+});
+
+test('an init failure shows a visible error instead of silence', () => {
+  const tab = openTab('https://5ka.ru/catalog', 100, new Map(), '/product/milk', w => {
+    w.console.error = () => {};
+    const create = w.document.createElement.bind(w.document);
+    w.document.createElement = tag => { if (tag === 'style') throw new TypeError('blocked'); return create(tag); };
+  });
+  try {
+    assert.equal(tab.w.document.querySelector('#pc-panel'), null);
+    const banner = tab.w.document.querySelector('#pc-error');
+    assert.ok(banner);
+    assert.match(banner.textContent, /панель не удалось создать \(TypeError\)/);
+  } finally { tab.dom.window.close(); }
+});
+
+test('the script starts when body appears after DOMContentLoaded already fired', async () => {
+  const tab = openTab('https://5ka.ru/catalog', 100, new Map(), '/product/milk', w => { w.document.body.remove(); });
+  try {
+    assert.equal(tab.w.document.querySelector('#pc-panel'), null);
+    tab.w.document.documentElement.appendChild(tab.w.document.createElement('body'));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.ok(tab.w.document.querySelector('#pc-panel'));
   } finally { tab.dom.window.close(); }
 });
 

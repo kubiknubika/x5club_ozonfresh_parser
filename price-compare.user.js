@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Сравнение цен: Пятёрочка, Перекрёсток, Ozon
 // @namespace    x5club-ozonfresh-price-compare
-// @version      1.2.0
+// @version      1.3.0
 // @description  Сохраняет увиденные товары и осторожно сравнивает цены между магазинами
 // @match        https://5ka.ru/*
 // @match        https://*.5ka.ru/*
@@ -105,7 +105,9 @@
   }
 
   // Pure helpers can be tested under Node without a browser or Tampermonkey.
-  if (typeof module !== 'undefined' && module.exports) {
+  // The window check matters in a browser: a page or another script manager
+  // can expose a global `module`, and that must not silently stop the script.
+  if (typeof window === 'undefined' && typeof module !== 'undefined' && module.exports) {
     module.exports = { measureOf, analyze, parsePrice, validBarcode, match, comparison };
     return;
   }
@@ -118,14 +120,20 @@
     return null;
   }
   const store = storeForHost(location.hostname);
-  if (!store || window.top !== window.self) return;
+  // Never leave silently before the panel exists: with no trace anywhere this
+  // looks exactly like the browser not injecting the script at all. Only the
+  // store id is logged, never the page address.
+  if (!store) { console.info('[Price Compare] Неподдерживаемый сайт, скрипт остановлен.'); return; }
+  if (window.top !== window.self) { console.info('[Price Compare] Вложенная рамка (iframe), скрипт остановлен.'); return; }
+  console.info('[Price Compare] Скрипт запущен, магазин: ' + STORES[store] +
+    '. Если этой строки нет в консоли, браузер не внедрил скрипт — см. раздел «Если ничего не появилось» в README.');
 
   const selectors = {
     pyaterochka: '[data-testid*="product-card" i], [class*="product-card" i], [class*="ProductCard"]',
     perekrestok: '.product-card, [data-testid*="product-card" i], [class*="product-card" i], [class*="ProductCard"]',
     ozon: '.tile-root, [class*="tile-root" i]'
   };
-  const VERSION = '1.2.0';
+  const VERSION = '1.3.0';
   const LOG_FULL = 'pc_log_full_v1:';
   const LOG_ARCHIVE = 'pc_log_archive_v1:';
   const MAX_LOG_BYTES = 256 * 1024; // Estimated UTF-16 bytes, per session.
@@ -248,26 +256,32 @@
       totalEvents, dropped, totalScans, totalScanErrors, lastScan, lastError, events: log,
       archivedSessions: history }, null, 2);
   }
-  startLog();
-  tryMaintenance();
-  try { enabled = GM_getValue(ENABLED_KEY, true) !== false; }
-  catch (error) { logEvent('error', { phase: 'read_settings', error: errorKind(error) }); }
-  logEvent('started', { version: VERSION, store });
-  flushLog();
-  window.addEventListener('pagehide', () => {
-    if (logClosed) return;
-    logEvent('finished');
-    flushLog(true);
-    logClosed = true;
-  });
-  window.addEventListener('pageshow', event => {
-    if (!event.persisted) return;
+  // A storage/logging failure must not prevent the panel from appearing:
+  // without a panel the user has no way to see or report what went wrong.
+  try {
     startLog();
     tryMaintenance();
-    logEvent('resumed_from_cache', { version: VERSION, store });
+    try { enabled = GM_getValue(ENABLED_KEY, true) !== false; }
+    catch (error) { logEvent('error', { phase: 'read_settings', error: errorKind(error) }); }
+    logEvent('started', { version: VERSION, store });
     flushLog();
-    scan();
-  });
+    window.addEventListener('pagehide', () => {
+      if (logClosed) return;
+      logEvent('finished');
+      flushLog(true);
+      logClosed = true;
+    });
+    window.addEventListener('pageshow', event => {
+      if (!event.persisted) return;
+      startLog();
+      tryMaintenance();
+      logEvent('resumed_from_cache', { version: VERSION, store });
+      flushLog();
+      scan();
+    });
+  } catch (error) {
+    console.error('[Price Compare] Ошибка подготовки, панель всё равно будет создана:', errorKind(error));
+  }
 
   function readOffers() {
     const next = new Map();
@@ -550,9 +564,11 @@
     }
   }
   function init() {
+    if (document.getElementById('pc-panel')) return; // Already running (e.g. duplicate copy installed).
     const style = document.createElement('style');
     style.textContent = '.pc-badge{display:block;margin:4px 0;padding:4px 8px;border:1px solid #dadce0;border-radius:8px;background:#f8f9fa;color:#202124;font:12px/1.4 Arial,sans-serif}.pc-badge a{display:block;color:#176b39;text-decoration:none}.pc-badge a:hover{text-decoration:underline}#pc-panel{position:fixed;right:16px;bottom:16px;z-index:2147483647;width:245px;max-height:calc(100vh - 32px);overflow-y:auto;box-sizing:border-box;padding:12px;background:white;color:#202124;border:1px solid #dadce0;border-radius:12px;box-shadow:0 4px 20px #0003;font:13px/1.4 Arial,sans-serif}#pc-panel button{margin-top:8px}#pc-panel textarea{box-sizing:border-box;width:100%;height:120px;font:11px monospace}#pc-panel details{margin-top:8px}';
-    document.head.appendChild(style);
+    // document.head can be missing on unusual documents; the panel matters more.
+    (document.head || document.documentElement).appendChild(style);
     const panel = document.createElement('div');
     panel.id = 'pc-panel';
     panel.innerHTML = '<strong>Сравнение цен</strong><div>Сейчас: ' + STORES[store] + '</div><div id="pc-stats"></div><small>Листайте каталоги. Цены и совпадения нужно проверять.</small><label style="display:block"><input id="pc-enabled" type="checkbox"> Показывать подсказки</label><button id="pc-clear" type="button">Очистить базу</button><details id="pc-diagnostics"><summary>Диагностика</summary><div id="pc-diagnostic-status"></div><small>Журнал содержит названия и цены товаров. Проверьте его перед отправкой.</small><div><button id="pc-report" type="button">Подготовить отчёт</button> <button id="pc-clear-logs" type="button">Очистить журналы</button></div><div id="pc-report-area" hidden><small>Нажмите «Копировать» или выделите текст вручную.</small><textarea id="pc-report-text" readonly aria-label="Отчёт диагностики"></textarea><button id="pc-copy" type="button">Копировать</button><span id="pc-copy-status" role="status"></span></div></details>';
@@ -601,15 +617,44 @@
     setInterval(scan, INTERVAL);
     scan();
   }
+  let uiStarted = false;
+  function showInitError(kind) {
+    // Last-resort visible trace: previously an init failure was written only
+    // to the log inside the panel that had just failed to appear.
+    try {
+      if (!document.body || document.getElementById('pc-error')) return;
+      const banner = document.createElement('div');
+      banner.id = 'pc-error';
+      banner.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;max-width:280px;padding:12px;background:white;color:#202124;border:2px solid #d93025;border-radius:12px;font:13px/1.4 Arial,sans-serif';
+      banner.textContent = 'Сравнение цен: скрипт запущен, но панель не удалось создать (' + kind + '). ' +
+        'Нажмите F12, откройте Console и найдите строки «[Price Compare]» — пришлите их вместе с описанием проблемы.';
+      document.body.appendChild(banner);
+    } catch (_) { /* The console message remains the fallback. */ }
+  }
   function startUI() {
+    if (uiStarted) return;
+    uiStarted = true;
     try { init(); }
     catch (error) {
       const kind = errorKind(error);
-      logEvent('error', { phase: 'init', error: kind });
-      flushLog();
+      try { logEvent('error', { phase: 'init', error: kind }); flushLog(); } catch (_) {}
       console.error('[Price Compare] Initialization failed:', kind);
+      showInitError(kind);
     }
   }
-  if (document.body) startUI();
-  else document.addEventListener('DOMContentLoaded', startUI, { once: true });
+  function startWhenReady() {
+    if (document.body) { startUI(); return; }
+    // DOMContentLoaded may already have fired if the manager injected the
+    // script late; waiting only for it would silently never start.
+    document.addEventListener('DOMContentLoaded', startUI, { once: true });
+    if (document.documentElement) {
+      const observer = new MutationObserver(() => {
+        if (!document.body) return;
+        observer.disconnect();
+        startUI();
+      });
+      observer.observe(document.documentElement, { childList: true });
+    }
+  }
+  startWhenReady();
 })();
