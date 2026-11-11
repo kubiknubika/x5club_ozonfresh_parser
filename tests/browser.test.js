@@ -5,7 +5,7 @@ const { JSDOM } = require('jsdom');
 const fs = require('node:fs');
 const script = fs.readFileSync(require.resolve('../price-compare.user.js'), 'utf8');
 
-function openTab(url, price, db, link = '/product/milk') {
+function openTab(url, price, db, link = '/product/milk', beforeEval = null) {
   const dom = new JSDOM(`<!doctype html><html><head></head><body><article class="product-card"><a ${link === null ? '' : `href="${link}"`}><img alt="Молоко Домик 1 л"></a><span class="price">${price} ₽</span></article></body></html>`, { url, runScripts: 'outside-only' });
   const w = dom.window;
   let interval;
@@ -15,6 +15,7 @@ function openTab(url, price, db, link = '/product/milk') {
   w.GM_listValues = () => [...db.keys()];
   w.setInterval = fn => { interval = fn; return 1; };
   w.confirm = () => true;
+  if (beforeEval) beforeEval(w);
   w.eval(script);
   return { w, dom, scan: () => interval() };
 }
@@ -40,6 +41,104 @@ test('tabs exchange prices, refresh badges and clear the actual shared database'
   } finally { a.dom.window.close(); b.dom.window.close(); }
 });
 
+test('an Ozon installment caption is not mistaken for the product name', () => {
+  const db = new Map();
+  const dom = openCustom(
+    '<div class="tile-root"><div class="finance-name">0% до 140 дней</div>' +
+    '<a href="/product/146950238"><img alt="Голень куриная 0,9-1 кг, Петелинка, охлажденная"></a>' +
+    '<span>389 ₽</span></div>',
+    'https://www.ozon.ru/category/myaso/', db);
+  try {
+    const offers = [...db.entries()].filter(([key]) => key.startsWith('pc_offer_v1:')).map(([, value]) => value);
+    assert.equal(offers.length, 1);
+    assert.equal(offers[0].name, 'Голень куриная 0,9-1 кг, Петелинка, охлажденная');
+    assert.equal(offers[0].price, 389);
+  } finally { dom.window.close(); }
+});
+
+test('a price split into ruble, kopeck and currency spans is still parsed', () => {
+  const db = new Map();
+  const dom = openCustom(
+    '<article class="product-card"><a href="/product/golen"><img alt="Голень куриная Троекурово охлаждённая, 900г"></a>' +
+    '<div class="price"><span>406</span> <span>99</span> <span>₽</span></div></article>',
+    'https://www.perekrestok.ru/catalog', db);
+  try {
+    const offers = [...db.entries()].filter(([key]) => key.startsWith('pc_offer_v1:')).map(([, value]) => value);
+    assert.equal(offers.length, 1);
+    assert.equal(offers[0].price, 406.99);
+  } finally { dom.window.close(); }
+});
+
+test('BEM sub-elements do not shred a Perekrestok card into fragments', () => {
+  const db = new Map();
+  const dom = openCustom(
+    '<div class="product-card"><div class="product-card__media"><a href="/product/golen">' +
+    '<img alt="Голень куриная Троекурово охлаждённая, 900г"></a></div>' +
+    '<div class="product-card__title">Голень куриная Троекурово охлаждённая, 900г</div>' +
+    '<div class="product-card__price">406,99 ₽</div></div>',
+    'https://www.perekrestok.ru/catalog', db);
+  try {
+    const offers = [...db.entries()].filter(([key]) => key.startsWith('pc_offer_v1:')).map(([, value]) => value);
+    assert.equal(offers.length, 1);
+    assert.equal(offers[0].name, 'Голень куриная Троекурово охлаждённая, 900г');
+    assert.equal(offers[0].price, 406.99);
+  } finally { dom.window.close(); }
+});
+
+test('fallback assembles a deep card whose only action is a button', () => {
+  const db = new Map();
+  const dom = openCustom(
+    '<section><div><img alt="Молоко Домик в деревне 1 л"><div><div><div><div><div><div>' +
+    '<span>199 ₽</span></div></div></div></div></div></div><button>В корзину</button></div></section>',
+    'https://5ka.ru/catalog', db);
+  try {
+    const offers = [...db.entries()].filter(([key]) => key.startsWith('pc_offer_v1:')).map(([, value]) => value);
+    assert.equal(offers.length, 1);
+    assert.equal(offers[0].price, 199);
+    const report = getReport({ w: dom.window });
+    assert.equal(report.lastScan.cardSource, 'fallback');
+    assert.ok(report.lastScan.fallbackSamples.includes('199 ₽'));
+  } finally { dom.window.close(); }
+});
+
+test('glued split prices parse on a 5ka-like catalog and header prices seed no cards', () => {
+  const db = new Map();
+  const dom = openCustom(
+    '<header><img alt="Пятёрочка"><a href="/">Главная</a><span>13,0 ₽</span></header>' +
+    '<div class="tile"><a href="/product/tushka"><img alt="Тушка цыпленка Петелинка 1 сорта охлажденная"></a>' +
+    '<div><span>289</span><span>99</span><span>₽</span></div></div>',
+    'https://5ka.ru/catalog', db);
+  try {
+    const offers = [...db.entries()].filter(([key]) => key.startsWith('pc_offer_v1:')).map(([, value]) => value);
+    assert.equal(offers.length, 1);
+    assert.equal(offers[0].name, 'Тушка цыпленка Петелинка 1 сорта охлажденная');
+    assert.equal(offers[0].price, 289.99);
+  } finally { dom.window.close(); }
+});
+
+test('an AggregateOffer lowPrice from JSON-LD is accepted', () => {
+  const tab = openTab('https://5ka.ru/catalog', 123, new Map());
+  try {
+    const json = tab.w.document.createElement('script');
+    json.type = 'application/ld+json';
+    json.textContent = JSON.stringify({ '@type': 'Product', name: 'Масло крестьянское 82,5%', offers: { '@type': 'AggregateOffer', lowPrice: '140', priceCurrency: 'RUB' } });
+    tab.w.document.body.appendChild(json);
+    tab.scan();
+    const report = getReport(tab);
+    assert.equal(report.lastScan.jsonOffers, 1);
+    assert.ok(report.events.some(event => event.event === 'json_offer' && event.price === 140));
+  } finally { tab.dom.window.close(); }
+});
+
+test('the panel lists collected offers so the user can inspect and copy them', () => {
+  const db = new Map();
+  const tab = openTab('https://5ka.ru/catalog', 100, db);
+  try {
+    assert.match(tab.w.document.querySelector('#pc-collected-summary').textContent, /Собранные товары: 1/);
+    assert.match(tab.w.document.querySelector('#pc-collected-list').textContent, /Пятёрочка · Молоко Домик 1 л — 100 ₽/);
+  } finally { tab.dom.window.close(); }
+});
+
 test('a card without a product link is stored without a fabricated URL', () => {
   const db = new Map();
   const tab = openTab('https://5ka.ru/catalog', 100, db, null);
@@ -49,6 +148,19 @@ test('a card without a product link is stored without a fabricated URL', () => {
     assert.equal(offer.url, null);
   } finally { tab.dom.window.close(); }
 });
+
+function openCustom(html, url, db) {
+  const dom = new JSDOM(`<!doctype html><html><head></head><body>${html}</body></html>`, { url, runScripts: 'outside-only' });
+  const w = dom.window;
+  w.GM_getValue = (key, fallback) => db.has(key) ? db.get(key) : fallback;
+  w.GM_setValue = (key, value) => db.set(key, structuredClone(value));
+  w.GM_deleteValue = key => db.delete(key);
+  w.GM_listValues = () => [...db.keys()];
+  w.setInterval = () => 1;
+  w.confirm = () => true;
+  w.eval(script);
+  return dom;
+}
 
 function getReport(tab) {
   tab.w.document.querySelector('#pc-report').click();
@@ -242,6 +354,74 @@ test('storage pressure deletes old summaries but does not evict active full logs
   try {
     assert.equal(db.has('pc_log_archive_v1:old'), false);
     assert.equal(db.has('pc_log_full_v1:live'), true);
+  } finally { tab.dom.window.close(); }
+});
+
+test('a page-global module object does not silently stop the userscript', () => {
+  const tab = openTab('https://5ka.ru/catalog', 100, new Map(), '/product/milk', w => { w.module = { exports: {} }; });
+  try {
+    assert.ok(tab.w.document.querySelector('#pc-panel'));
+  } finally { tab.dom.window.close(); }
+});
+
+test('an unsupported site leaves a console trace and no panel', () => {
+  const messages = [];
+  const tab = openTab('https://example.com/catalog', 100, new Map(), '/product/milk', w => {
+    w.console.info = (...args) => messages.push(args.join(' '));
+  });
+  try {
+    assert.equal(tab.w.document.querySelector('#pc-panel'), null);
+    assert.ok(messages.some(text => text.includes('[Price Compare]') && text.includes('Неподдерживаемый сайт')));
+  } finally { tab.dom.window.close(); }
+});
+
+test('a supported site logs that the script started', () => {
+  const messages = [];
+  const tab = openTab('https://5ka.ru/catalog', 100, new Map(), '/product/milk', w => {
+    w.console.info = (...args) => messages.push(args.join(' '));
+  });
+  try {
+    assert.ok(tab.w.document.querySelector('#pc-panel'));
+    assert.ok(messages.some(text => text.includes('[Price Compare]') && text.includes('Скрипт запущен')));
+  } finally { tab.dom.window.close(); }
+});
+
+test('the panel still appears when the document has no head', () => {
+  const tab = openTab('https://5ka.ru/catalog', 100, new Map(), '/product/milk', w => { w.document.head.remove(); });
+  try {
+    assert.ok(tab.w.document.querySelector('#pc-panel'));
+  } finally { tab.dom.window.close(); }
+});
+
+test('an init failure shows a visible error instead of silence', () => {
+  const tab = openTab('https://5ka.ru/catalog', 100, new Map(), '/product/milk', w => {
+    w.console.error = () => {};
+    const create = w.document.createElement.bind(w.document);
+    w.document.createElement = tag => { if (tag === 'style') throw new TypeError('blocked'); return create(tag); };
+  });
+  try {
+    assert.equal(tab.w.document.querySelector('#pc-panel'), null);
+    const banner = tab.w.document.querySelector('#pc-error');
+    assert.ok(banner);
+    assert.match(banner.textContent, /панель не удалось создать \(TypeError\)/);
+  } finally { tab.dom.window.close(); }
+});
+
+test('the script starts when body appears after DOMContentLoaded already fired', async () => {
+  const tab = openTab('https://5ka.ru/catalog', 100, new Map(), '/product/milk', w => { w.document.body.remove(); });
+  try {
+    assert.equal(tab.w.document.querySelector('#pc-panel'), null);
+    tab.w.document.documentElement.appendChild(tab.w.document.createElement('body'));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.ok(tab.w.document.querySelector('#pc-panel'));
+  } finally { tab.dom.window.close(); }
+});
+
+test('an SPA urlchange without reload is logged so the tab rescans', () => {
+  const tab = openTab('https://5ka.ru/catalog', 100, new Map());
+  try {
+    tab.w.dispatchEvent(new tab.w.Event('urlchange'));
+    assert.ok(getReport(tab).events.some(event => event.event === 'url_changed'));
   } finally { tab.dom.window.close(); }
 });
 

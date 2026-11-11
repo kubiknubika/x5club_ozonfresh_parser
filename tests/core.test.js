@@ -34,6 +34,21 @@ test('validate and prioritize GTIN, without merging conflicting barcodes', () =>
   assert.equal(match({ name: 'Одинаковый товар', barcode: '4006381333931' }, { name: 'Одинаковый товар', barcode: '5901234123457' }), false);
 });
 
+test('weight ranges are priced by the upper bound and leave no stray tokens', () => {
+  assert.equal(measureOf('Голень куриная 0,9-1 кг, Петелинка').value, 1000);
+  assert.equal(measureOf('Голень куриная 0,80-0,90 кг').value, 900);
+  assert.equal(measureOf('Крылья 800-900 г').value, 900);
+  assert.ok(!analyze('Голень куриная 0,9-1 кг').tokens.includes('0,9'));
+});
+
+test('the same chicken is matched across store naming variants', () => {
+  const perekrestok = { name: 'Голень цыплёнка Петелинка охлаждённая', price: 388.99 };
+  const ozon = { name: 'Голень куриная 0,9-1 кг, Петелинка, охлажденная', price: 389 };
+  assert.equal(match(perekrestok, ozon), true);
+  // A different cut of the same brand must not be merged by the synonym map.
+  assert.equal(match(perekrestok, { name: 'Крылья куриные Петелинка охлажденные', price: 300 }), false);
+});
+
 test('unit comparisons, including counts and unknown packs', () => {
   const a = { name: 'Молоко Домик 1 л', price: 100 };
   const b = { name: 'Молоко Домик 930 мл', price: 93 };

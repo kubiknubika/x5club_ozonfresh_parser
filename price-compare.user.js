@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Сравнение цен: Пятёрочка, Перекрёсток, Ozon
 // @namespace    x5club-ozonfresh-price-compare
-// @version      1.2.0
+// @version      1.4.3
 // @description  Сохраняет увиденные товары и осторожно сравнивает цены между магазинами
 // @match        https://5ka.ru/*
 // @match        https://*.5ka.ru/*
@@ -15,6 +15,7 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_listValues
+// @grant        window.onurlchange
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
@@ -33,28 +34,55 @@
   // JS \b does not recognize Cyrillic letters. Explicit letter boundaries do.
   const MULTI_RE = new RegExp('(\\d+(?:[.,]\\d+)?)\\s*[xх×*]\\s*(\\d+(?:[.,]\\d+)?)\\s*' + MEASURE + '(?![a-zа-яё])', 'i');
   const SINGLE_RE = new RegExp('(\\d+(?:[.,]\\d+)?)\\s*' + MEASURE + '(?![a-zа-яё])', 'i');
+  // Stores sell ranged packs as "0,9-1 кг" and price them by the upper bound.
+  const RANGE_RE = new RegExp('(\\d+(?:[.,]\\d+)?)\\s*[-–—]\\s*(\\d+(?:[.,]\\d+)?)\\s*' + MEASURE + '(?![a-zа-яё])', 'i');
+  const MULTI_RE_G = new RegExp(MULTI_RE.source, 'gi');
+  const SINGLE_RE_G = new RegExp(SINGLE_RE.source, 'gi');
+  const RANGE_RE_G = new RegExp(RANGE_RE.source, 'gi');
 
-  function measureOf(name) {
-    const text = String(name || '').toLowerCase();
-    let m = text.match(MULTI_RE);
-    const multiplier = m ? Number(m[1].replace(',', '.')) : 1;
-    if (!m) m = text.match(SINGLE_RE);
-    if (!m) return null;
-    const n = Number((m[m.length - 2]).replace(',', '.')) * multiplier;
-    const unit = m[m.length - 1];
+  // Promo labels are not product names, however title-like their markup is:
+  // installment captions ("0% до 140 дней") and marketing badges.
+  const PROMO_NAME_RE = /\d+(?:[.,]\d+)?%\s*(?:до|на)\s*\d+\s*(?:дней|дня|мес)|рассроч|без переплат|оплатить позже|цена что надо/i;
+  function isPromoName(text) { return PROMO_NAME_RE.test(String(text || '')); }
+
+  function toMeasure(n, unit) {
     if (!Number.isFinite(n) || n <= 0) return null;
     const type = ['кг', 'г', 'гр'].includes(unit) ? 'weight' : ['л', 'мл'].includes(unit) ? 'volume' : 'count';
     const value = n * (unit === 'кг' || unit === 'л' ? 1000 : 1);
     return { type, value, display: value + ' ' + (type === 'weight' ? 'г' : type === 'volume' ? 'мл' : 'шт') };
   }
 
+  function measureOf(name) {
+    const text = String(name || '').toLowerCase();
+    let m = text.match(RANGE_RE);
+    if (m) return toMeasure(Number(m[2].replace(',', '.')), m[3]);
+    m = text.match(MULTI_RE);
+    const multiplier = m ? Number(m[1].replace(',', '.')) : 1;
+    if (!m) m = text.match(SINGLE_RE);
+    if (!m) return null;
+    return toMeasure(Number((m[m.length - 2]).replace(',', '.')) * multiplier, m[m.length - 1]);
+  }
+
+  // The same product is named differently across stores: "Голень цыплёнка"
+  // in one, "Голень куриная 0,9-1 кг" in another. Normalize only well-known
+  // variants; every other word and number must still agree exactly.
+  const TOKEN_SYNONYMS = {
+    'куриная': 'курица', 'куриный': 'курица', 'куриное': 'курица', 'куриные': 'курица',
+    'цыпленка': 'курица', 'цыпленок': 'курица', 'цыплята': 'курица', 'цыплят': 'курица'
+  };
+  function normalizeToken(token) {
+    if (token.startsWith('охлажден')) return 'охлажден';
+    if (token.startsWith('заморож')) return 'заморож';
+    return TOKEN_SYNONYMS[token] || token;
+  }
+
   function analyze(name) {
     const measure = measureOf(name);
     const cleaned = String(name || '').toLowerCase().replace(/ё/g, 'е')
-      .replace(MULTI_RE, ' ').replace(SINGLE_RE, ' ')
+      .replace(RANGE_RE_G, ' ').replace(MULTI_RE_G, ' ').replace(SINGLE_RE_G, ' ')
       .replace(/(\d)\s*%/g, '$1%');
     // Keep every meaningful word and number: flavor and fat percentage matter.
-    const tokens = cleaned.match(/[a-zа-я]+|\d+(?:[.,]\d+)?%?/g) || [];
+    const tokens = (cleaned.match(/[a-zа-я]+|\d+(?:[.,]\d+)?%?/g) || []).map(normalizeToken);
     return { measure, tokens: tokens.sort(), key: tokens.sort().join(' ') };
   }
 
@@ -76,6 +104,11 @@
       value = Number(groups.join('')) + (decimals === null ? 0 : Number(decimals) / 100);
     }
     return Number.isFinite(value) && value > 0 && value <= 999999 ? value : null;
+  }
+
+  function parsePriceText(text) {
+    // A label glued to the amount ("Цена28999 ₽") is not part of the price.
+    return parsePrice(String(text == null ? '' : text).replace(/^(?:цена|стоимость)\s*:?\s*/i, ''));
   }
 
   function validBarcode(value) {
@@ -105,7 +138,9 @@
   }
 
   // Pure helpers can be tested under Node without a browser or Tampermonkey.
-  if (typeof module !== 'undefined' && module.exports) {
+  // The window check matters in a browser: a page or another script manager
+  // can expose a global `module`, and that must not silently stop the script.
+  if (typeof window === 'undefined' && typeof module !== 'undefined' && module.exports) {
     module.exports = { measureOf, analyze, parsePrice, validBarcode, match, comparison };
     return;
   }
@@ -118,14 +153,20 @@
     return null;
   }
   const store = storeForHost(location.hostname);
-  if (!store || window.top !== window.self) return;
+  // Never leave silently before the panel exists: with no trace anywhere this
+  // looks exactly like the browser not injecting the script at all. Only the
+  // store id is logged, never the page address.
+  if (!store) { console.info('[Price Compare] Неподдерживаемый сайт, скрипт остановлен.'); return; }
+  if (window.top !== window.self) { console.info('[Price Compare] Вложенная рамка (iframe), скрипт остановлен.'); return; }
+  console.info('[Price Compare] Скрипт запущен, магазин: ' + STORES[store] +
+    '. Если этой строки нет в консоли, браузер не внедрил скрипт — см. раздел «Если ничего не появилось» в README.');
 
   const selectors = {
     pyaterochka: '[data-testid*="product-card" i], [class*="product-card" i], [class*="ProductCard"]',
     perekrestok: '.product-card, [data-testid*="product-card" i], [class*="product-card" i], [class*="ProductCard"]',
     ozon: '.tile-root, [class*="tile-root" i]'
   };
-  const VERSION = '1.2.0';
+  const VERSION = '1.4.3';
   const LOG_FULL = 'pc_log_full_v1:';
   const LOG_ARCHIVE = 'pc_log_archive_v1:';
   const MAX_LOG_BYTES = 256 * 1024; // Estimated UTF-16 bytes, per session.
@@ -248,26 +289,32 @@
       totalEvents, dropped, totalScans, totalScanErrors, lastScan, lastError, events: log,
       archivedSessions: history }, null, 2);
   }
-  startLog();
-  tryMaintenance();
-  try { enabled = GM_getValue(ENABLED_KEY, true) !== false; }
-  catch (error) { logEvent('error', { phase: 'read_settings', error: errorKind(error) }); }
-  logEvent('started', { version: VERSION, store });
-  flushLog();
-  window.addEventListener('pagehide', () => {
-    if (logClosed) return;
-    logEvent('finished');
-    flushLog(true);
-    logClosed = true;
-  });
-  window.addEventListener('pageshow', event => {
-    if (!event.persisted) return;
+  // A storage/logging failure must not prevent the panel from appearing:
+  // without a panel the user has no way to see or report what went wrong.
+  try {
     startLog();
     tryMaintenance();
-    logEvent('resumed_from_cache', { version: VERSION, store });
+    try { enabled = GM_getValue(ENABLED_KEY, true) !== false; }
+    catch (error) { logEvent('error', { phase: 'read_settings', error: errorKind(error) }); }
+    logEvent('started', { version: VERSION, store });
     flushLog();
-    scan();
-  });
+    window.addEventListener('pagehide', () => {
+      if (logClosed) return;
+      logEvent('finished');
+      flushLog(true);
+      logClosed = true;
+    });
+    window.addEventListener('pageshow', event => {
+      if (!event.persisted) return;
+      startLog();
+      tryMaintenance();
+      logEvent('resumed_from_cache', { version: VERSION, store });
+      flushLog();
+      scan();
+    });
+  } catch (error) {
+    console.error('[Price Compare] Ошибка подготовки, панель всё равно будет создана:', errorKind(error));
+  }
 
   function readOffers() {
     const next = new Map();
@@ -292,7 +339,7 @@
   }
 
   function saveOffer(data) {
-    if (!data.name || !data.price || analyze(data.name).tokens.length < 2) return 'rejected';
+    if (!data.name || !data.price || isPromoName(data.name) || analyze(data.name).tokens.length < 2) return 'rejected';
     const offer = { store, name: data.name, price: data.price, url: safeProductUrl(data.url), barcode: validBarcode(data.barcode), ts: Date.now() };
     // Independent records prevent an unrelated tab from overwriting the entire DB.
     const key = PREFIX + store + ':' + encodeURIComponent(offer.url || offer.name);
@@ -303,30 +350,58 @@
     return 'saved';
   }
 
+  function usableName(text) {
+    return !!text && text.length >= 4 && text.length <= 180 && !/₽/.test(text) &&
+      !/^(в корзину|купить|акция|скидка|новинка)$/i.test(text) && !isPromoName(text);
+  }
   function nameOf(card) {
     const selector = '[data-testid*="title" i], [data-testid*="name" i], [class*="title" i], [class*="name" i], a[title], img[alt]';
+    const candidates = [];
     for (const el of card.querySelectorAll(selector)) {
       if (el.closest('.pc-badge')) continue;
       const text = (el.getAttribute('title') || el.getAttribute('alt') || el.textContent || '').replace(/\s+/g, ' ').trim();
-      if (text.length >= 4 && text.length <= 180 && !/₽|^(в корзину|купить|акция|скидка|новинка)$/i.test(text)) return text;
+      if (usableName(text)) candidates.push({ text, el });
+    }
+    if (candidates.length) {
+      // A product title is (inside) a product link; an installment caption or
+      // a badge is not. Among unlinked candidates the longest text wins: real
+      // titles are longer than labels. First-in-DOM used to pick the promo.
+      const linked = candidates.find(candidate => candidate.el.closest('a[href]'));
+      if (linked) return linked.text;
+      candidates.sort((a, b) => b.text.length - a.text.length);
+      return candidates[0].text;
     }
     for (const el of card.querySelectorAll('a[href]')) {
       if (el.closest('.pc-badge')) continue;
       const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-      if (text.length >= 4 && text.length <= 180 && !/₽|^(в корзину|купить|акция|скидка|новинка)$/i.test(text)) return text;
+      if (usableName(text)) return text;
     }
     return null;
+  }
+
+  function priceTextOf(el) {
+    // Prices are often built from leaf spans ("289" + "99" + "₽"); glued
+    // textContent would read "28999₽", so join leaf children with spaces.
+    const children = [...el.children];
+    if (children.length >= 2 && children.length <= 6 && children.every(child => !child.children.length)) {
+      const joined = children.map(child => (child.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean).join(' ');
+      if (joined) return joined;
+    }
+    return (el.textContent || '').replace(/\s+/g, ' ').trim();
   }
 
   function priceOf(card, samples) {
     const candidates = [];
     for (const el of card.querySelectorAll('span,div,p,b,strong')) {
-      if (el.closest('.pc-badge, #pc-panel') || el.children.length > 2) continue;
-      const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      // Prices are often split into ruble/kopeck/currency spans, so a price
+      // block may have several children; its full text must still parse below.
+      if (el.closest('.pc-badge, #pc-panel') || el.children.length > 6) continue;
+      const rawText = (el.textContent || '').replace(/\s+/g, ' ').trim();
       // Limited raw price-like text helps diagnose markup/format changes.
-      if (text.length <= 80 && /₽|руб/i.test(text) && samples.length < 5 && !samples.includes(text)) samples.push(text);
+      if (rawText.length <= 80 && /₽|руб/i.test(rawText) && samples.length < 5 && !samples.includes(rawText)) samples.push(rawText);
+      const text = priceTextOf(el);
       if (text.length > 35 || (text.match(/₽|руб/gi) || []).length !== 1 || /\/\s*(?:кг|л|100|шт)/i.test(text)) continue;
-      const price = parsePrice(text);
+      const price = parsePriceText(text);
       if (price) candidates.push({ price, el });
     }
     candidates.sort((a, b) => a.price - b.price);
@@ -336,7 +411,11 @@
   function getCards(stats) {
     let cards = [...document.querySelectorAll(selectors[store])];
     stats.selectorNodes = cards.length;
-    cards = cards.filter(card => !cards.some(other => card !== other && card.contains(other)));
+    // Keep the outermost match, not the innermost: BEM markup nests elements
+    // like product-card__price inside product-card, and keeping the innermost
+    // match shredded every Perekrestok card into nameless, priceless fragments
+    // (a live report showed 81 "cards" with neither name nor price).
+    cards = cards.filter(card => !cards.some(other => card !== other && other.contains(card)));
     // Fallback is deliberately limited to ancestors of plausible price elements.
     if (cards.length) { stats.cardSource = 'selector'; return cards; }
     stats.cardSource = 'fallback';
@@ -344,14 +423,24 @@
     for (const el of document.querySelectorAll('span,div,p')) {
       if (el.closest('.pc-badge, #pc-panel')) continue;
       const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      // Keep a few raw price-like texts so a report shows the price format of
+      // a store whose cards do not assemble yet (Pyaterochka at the moment).
+      if (text.length <= 80 && /₽|руб/i.test(text) && stats.fallbackSamples.length < 5 && !stats.fallbackSamples.includes(text)) stats.fallbackSamples.push(text);
+      // Header/nav/footer prices (balance, delivery) are not product prices
+      // and must not seed cards: climbing from them used to "assemble" the
+      // whole page root and price a chicken at the 13 ₽ delivery figure.
+      if (el.closest('header, nav, footer')) continue;
       if (text.length > 35) continue;
       if (/₽|руб/i.test(text)) stats.fallbackCurrencyNodes++;
-      if (!parsePrice(text)) continue;
+      if (!parsePriceText(priceTextOf(el))) continue;
       stats.fallbackParsedPriceNodes++;
       let node = el;
-      for (let i = 0; i < 6 && node && node !== document.body; i++, node = node.parentElement) {
+      for (let i = 0; i < 10 && node && node !== document.body; i++, node = node.parentElement) {
         if ((node.textContent.match(/₽/g) || []).length > 4) break;
-        if (node.querySelector('img') && node.querySelector('a[href]')) { found.add(node); break; }
+        // A real card is compact; a page-sized ancestor is not a card.
+        if ((node.textContent || '').length > 2000 || node.querySelectorAll('img').length > 3) break;
+        // Clickable cards may have a button instead of a product link.
+        if (node.querySelector('img') && node.querySelector('a[href], button')) { found.add(node); break; }
       }
     }
     return [...found];
@@ -432,7 +521,8 @@
         const items = Array.isArray(obj.offers) ? obj.offers : [obj.offers];
         for (const item of items) {
           if (!item || typeof item !== 'object' || (item.priceCurrency && item.priceCurrency !== 'RUB')) continue;
-          const price = parsePrice(item.price, false);
+          // AggregateOffer carries lowPrice instead of price (seen on 5ka product pages).
+          const price = parsePrice(item.price != null ? item.price : item.lowPrice, false);
           if (price) {
             stats.jsonOffers++;
             const result = saveOffer({ name: obj.name, price, url: item.url || obj.url || location.href, barcode: obj.gtin13 || obj.gtin || obj.ean });
@@ -452,11 +542,20 @@
     }
   }
 
+  function collectedText() {
+    // Newest first; this exact text is what "Скопировать список" sends to the clipboard.
+    return [...offers.values()].sort((a, b) => b.ts - a.ts)
+      .map(offer => STORES[offer.store] + ' · ' + offer.name + ' — ' + fmt(offer.price) + ' ₽').join('\n');
+  }
   function updatePanel() {
     const stats = document.getElementById('pc-stats');
     if (!stats) return;
     const values = [...offers.values()];
     stats.textContent = Object.entries(STORES).map(([id, name]) => name + ': ' + values.filter(o => o.store === id).length).join(' · ');
+    const summary = document.getElementById('pc-collected-summary');
+    if (summary) summary.textContent = 'Собранные товары: ' + values.length;
+    const list = document.getElementById('pc-collected-list');
+    if (list) list.textContent = values.length ? collectedText() : 'Пока ничего не собрано. Откройте каталог и полистайте.';
   }
 
   function updateDiagnosticStatus() {
@@ -478,7 +577,7 @@
     logEvent('scan_started', { scanId });
     const started = Date.now();
     const stats = { phase: 'storage', selectorNodes: 0, cardSource: 'not_started', cards: 0,
-      fallbackCurrencyNodes: 0, fallbackParsedPriceNodes: 0,
+      fallbackCurrencyNodes: 0, fallbackParsedPriceNodes: 0, fallbackSamples: [],
       noName: 0, noPrice: 0, parsed: 0, saved: 0, unchanged: 0, rejected: 0,
       jsonScripts: 0, jsonInvalid: 0, jsonTooLarge: 0, jsonProducts: 0, jsonOffers: 0,
       matchedCards: 0, shownCards: 0, offersByStore: {}, durationMs: 0 };
@@ -550,12 +649,14 @@
     }
   }
   function init() {
+    if (document.getElementById('pc-panel')) return; // Already running (e.g. duplicate copy installed).
     const style = document.createElement('style');
     style.textContent = '.pc-badge{display:block;margin:4px 0;padding:4px 8px;border:1px solid #dadce0;border-radius:8px;background:#f8f9fa;color:#202124;font:12px/1.4 Arial,sans-serif}.pc-badge a{display:block;color:#176b39;text-decoration:none}.pc-badge a:hover{text-decoration:underline}#pc-panel{position:fixed;right:16px;bottom:16px;z-index:2147483647;width:245px;max-height:calc(100vh - 32px);overflow-y:auto;box-sizing:border-box;padding:12px;background:white;color:#202124;border:1px solid #dadce0;border-radius:12px;box-shadow:0 4px 20px #0003;font:13px/1.4 Arial,sans-serif}#pc-panel button{margin-top:8px}#pc-panel textarea{box-sizing:border-box;width:100%;height:120px;font:11px monospace}#pc-panel details{margin-top:8px}';
-    document.head.appendChild(style);
+    // document.head can be missing on unusual documents; the panel matters more.
+    (document.head || document.documentElement).appendChild(style);
     const panel = document.createElement('div');
     panel.id = 'pc-panel';
-    panel.innerHTML = '<strong>Сравнение цен</strong><div>Сейчас: ' + STORES[store] + '</div><div id="pc-stats"></div><small>Листайте каталоги. Цены и совпадения нужно проверять.</small><label style="display:block"><input id="pc-enabled" type="checkbox"> Показывать подсказки</label><button id="pc-clear" type="button">Очистить базу</button><details id="pc-diagnostics"><summary>Диагностика</summary><div id="pc-diagnostic-status"></div><small>Журнал содержит названия и цены товаров. Проверьте его перед отправкой.</small><div><button id="pc-report" type="button">Подготовить отчёт</button> <button id="pc-clear-logs" type="button">Очистить журналы</button></div><div id="pc-report-area" hidden><small>Нажмите «Копировать» или выделите текст вручную.</small><textarea id="pc-report-text" readonly aria-label="Отчёт диагностики"></textarea><button id="pc-copy" type="button">Копировать</button><span id="pc-copy-status" role="status"></span></div></details>';
+    panel.innerHTML = '<strong>Сравнение цен</strong><div>Сейчас: ' + STORES[store] + '</div><div id="pc-stats"></div><small>Листайте каталоги. Цены и совпадения нужно проверять.</small><details><summary id="pc-collected-summary">Собранные товары</summary><div id="pc-collected-list" style="white-space:pre-wrap;max-height:180px;overflow-y:auto"></div><button id="pc-copy-collected" type="button">Скопировать список</button><span id="pc-copy-collected-status" role="status"></span></details><label style="display:block"><input id="pc-enabled" type="checkbox"> Показывать подсказки</label><button id="pc-clear" type="button">Очистить базу</button><details id="pc-diagnostics"><summary>Диагностика</summary><div id="pc-diagnostic-status"></div><small>Журнал содержит названия и цены товаров. Проверьте его перед отправкой.</small><div><button id="pc-report" type="button">Подготовить отчёт</button> <button id="pc-clear-logs" type="button">Очистить журналы</button></div><div id="pc-report-area" hidden><small>Нажмите «Копировать» или выделите текст вручную.</small><textarea id="pc-report-text" readonly aria-label="Отчёт диагностики"></textarea><button id="pc-copy" type="button">Копировать</button><span id="pc-copy-status" role="status"></span></div></details>';
     document.body.appendChild(panel);
     const checkbox = panel.querySelector('#pc-enabled');
     checkbox.checked = enabled;
@@ -567,6 +668,16 @@
       scan();
     });
     panel.querySelector('#pc-clear').addEventListener('click', clear);
+    const copyListStatus = panel.querySelector('#pc-copy-collected-status');
+    panel.querySelector('#pc-copy-collected').addEventListener('click', async () => {
+      try {
+        if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error();
+        await navigator.clipboard.writeText(collectedText());
+        copyListStatus.textContent = ' Скопировано — вставьте список в чат (Ctrl+V).';
+      } catch (_) {
+        copyListStatus.textContent = ' Не удалось скопировать. Список виден выше; для отладки пришлите отчёт из «Диагностики».';
+      }
+    });
     panel.querySelector('#pc-clear-logs').addEventListener('click', clearLogs);
     const reportText = panel.querySelector('#pc-report-text');
     const copyStatus = panel.querySelector('#pc-copy-status');
@@ -598,18 +709,52 @@
       })) schedule();
     }).observe(document.body, { childList: true, subtree: true, characterData: true });
     window.addEventListener('scroll', schedule, { passive: true });
+    // SPA stores change the URL without reloading, and Tampermonkey does not
+    // re-inject then. This already-running copy rescans right away instead of
+    // waiting for the interval. Needs the window.onurlchange grant above and
+    // is a no-op in managers that never fire the event.
+    window.addEventListener('urlchange', () => { logEvent('url_changed', { store }); schedule(); });
     setInterval(scan, INTERVAL);
     scan();
   }
+  let uiStarted = false;
+  function showInitError(kind) {
+    // Last-resort visible trace: previously an init failure was written only
+    // to the log inside the panel that had just failed to appear.
+    try {
+      if (!document.body || document.getElementById('pc-error')) return;
+      const banner = document.createElement('div');
+      banner.id = 'pc-error';
+      banner.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;max-width:280px;padding:12px;background:white;color:#202124;border:2px solid #d93025;border-radius:12px;font:13px/1.4 Arial,sans-serif';
+      banner.textContent = 'Сравнение цен: скрипт запущен, но панель не удалось создать (' + kind + '). ' +
+        'Нажмите F12, откройте Console и найдите строки «[Price Compare]» — пришлите их вместе с описанием проблемы.';
+      document.body.appendChild(banner);
+    } catch (_) { /* The console message remains the fallback. */ }
+  }
   function startUI() {
+    if (uiStarted) return;
+    uiStarted = true;
     try { init(); }
     catch (error) {
       const kind = errorKind(error);
-      logEvent('error', { phase: 'init', error: kind });
-      flushLog();
+      try { logEvent('error', { phase: 'init', error: kind }); flushLog(); } catch (_) {}
       console.error('[Price Compare] Initialization failed:', kind);
+      showInitError(kind);
     }
   }
-  if (document.body) startUI();
-  else document.addEventListener('DOMContentLoaded', startUI, { once: true });
+  function startWhenReady() {
+    if (document.body) { startUI(); return; }
+    // DOMContentLoaded may already have fired if the manager injected the
+    // script late; waiting only for it would silently never start.
+    document.addEventListener('DOMContentLoaded', startUI, { once: true });
+    if (document.documentElement) {
+      const observer = new MutationObserver(() => {
+        if (!document.body) return;
+        observer.disconnect();
+        startUI();
+      });
+      observer.observe(document.documentElement, { childList: true });
+    }
+  }
+  startWhenReady();
 })();
