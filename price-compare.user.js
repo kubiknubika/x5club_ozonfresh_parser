@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Сравнение цен: Пятёрочка, Перекрёсток, Ozon
 // @namespace    x5club-ozonfresh-price-compare
-// @version      1.3.1
+// @version      1.4.0
 // @description  Сохраняет увиденные товары и осторожно сравнивает цены между магазинами
 // @match        https://5ka.ru/*
 // @match        https://*.5ka.ru/*
@@ -34,28 +34,50 @@
   // JS \b does not recognize Cyrillic letters. Explicit letter boundaries do.
   const MULTI_RE = new RegExp('(\\d+(?:[.,]\\d+)?)\\s*[xх×*]\\s*(\\d+(?:[.,]\\d+)?)\\s*' + MEASURE + '(?![a-zа-яё])', 'i');
   const SINGLE_RE = new RegExp('(\\d+(?:[.,]\\d+)?)\\s*' + MEASURE + '(?![a-zа-яё])', 'i');
+  // Stores sell ranged packs as "0,9-1 кг" and price them by the upper bound.
+  const RANGE_RE = new RegExp('(\\d+(?:[.,]\\d+)?)\\s*[-–—]\\s*(\\d+(?:[.,]\\d+)?)\\s*' + MEASURE + '(?![a-zа-яё])', 'i');
+  const MULTI_RE_G = new RegExp(MULTI_RE.source, 'gi');
+  const SINGLE_RE_G = new RegExp(SINGLE_RE.source, 'gi');
+  const RANGE_RE_G = new RegExp(RANGE_RE.source, 'gi');
 
-  function measureOf(name) {
-    const text = String(name || '').toLowerCase();
-    let m = text.match(MULTI_RE);
-    const multiplier = m ? Number(m[1].replace(',', '.')) : 1;
-    if (!m) m = text.match(SINGLE_RE);
-    if (!m) return null;
-    const n = Number((m[m.length - 2]).replace(',', '.')) * multiplier;
-    const unit = m[m.length - 1];
+  function toMeasure(n, unit) {
     if (!Number.isFinite(n) || n <= 0) return null;
     const type = ['кг', 'г', 'гр'].includes(unit) ? 'weight' : ['л', 'мл'].includes(unit) ? 'volume' : 'count';
     const value = n * (unit === 'кг' || unit === 'л' ? 1000 : 1);
     return { type, value, display: value + ' ' + (type === 'weight' ? 'г' : type === 'volume' ? 'мл' : 'шт') };
   }
 
+  function measureOf(name) {
+    const text = String(name || '').toLowerCase();
+    let m = text.match(RANGE_RE);
+    if (m) return toMeasure(Number(m[2].replace(',', '.')), m[3]);
+    m = text.match(MULTI_RE);
+    const multiplier = m ? Number(m[1].replace(',', '.')) : 1;
+    if (!m) m = text.match(SINGLE_RE);
+    if (!m) return null;
+    return toMeasure(Number((m[m.length - 2]).replace(',', '.')) * multiplier, m[m.length - 1]);
+  }
+
+  // The same product is named differently across stores: "Голень цыплёнка"
+  // in one, "Голень куриная 0,9-1 кг" in another. Normalize only well-known
+  // variants; every other word and number must still agree exactly.
+  const TOKEN_SYNONYMS = {
+    'куриная': 'курица', 'куриный': 'курица', 'куриное': 'курица', 'куриные': 'курица',
+    'цыпленка': 'курица', 'цыпленок': 'курица', 'цыплята': 'курица', 'цыплят': 'курица'
+  };
+  function normalizeToken(token) {
+    if (token.startsWith('охлажден')) return 'охлажден';
+    if (token.startsWith('заморож')) return 'заморож';
+    return TOKEN_SYNONYMS[token] || token;
+  }
+
   function analyze(name) {
     const measure = measureOf(name);
     const cleaned = String(name || '').toLowerCase().replace(/ё/g, 'е')
-      .replace(MULTI_RE, ' ').replace(SINGLE_RE, ' ')
+      .replace(RANGE_RE_G, ' ').replace(MULTI_RE_G, ' ').replace(SINGLE_RE_G, ' ')
       .replace(/(\d)\s*%/g, '$1%');
     // Keep every meaningful word and number: flavor and fat percentage matter.
-    const tokens = cleaned.match(/[a-zа-я]+|\d+(?:[.,]\d+)?%?/g) || [];
+    const tokens = (cleaned.match(/[a-zа-я]+|\d+(?:[.,]\d+)?%?/g) || []).map(normalizeToken);
     return { measure, tokens: tokens.sort(), key: tokens.sort().join(' ') };
   }
 
@@ -134,7 +156,7 @@
     perekrestok: '.product-card, [data-testid*="product-card" i], [class*="product-card" i], [class*="ProductCard"]',
     ozon: '.tile-root, [class*="tile-root" i]'
   };
-  const VERSION = '1.3.1';
+  const VERSION = '1.4.0';
   const LOG_FULL = 'pc_log_full_v1:';
   const LOG_ARCHIVE = 'pc_log_archive_v1:';
   const MAX_LOG_BYTES = 256 * 1024; // Estimated UTF-16 bytes, per session.
@@ -467,11 +489,20 @@
     }
   }
 
+  function collectedText() {
+    // Newest first; this exact text is what "Скопировать список" sends to the clipboard.
+    return [...offers.values()].sort((a, b) => b.ts - a.ts)
+      .map(offer => STORES[offer.store] + ' · ' + offer.name + ' — ' + fmt(offer.price) + ' ₽').join('\n');
+  }
   function updatePanel() {
     const stats = document.getElementById('pc-stats');
     if (!stats) return;
     const values = [...offers.values()];
     stats.textContent = Object.entries(STORES).map(([id, name]) => name + ': ' + values.filter(o => o.store === id).length).join(' · ');
+    const summary = document.getElementById('pc-collected-summary');
+    if (summary) summary.textContent = 'Собранные товары: ' + values.length;
+    const list = document.getElementById('pc-collected-list');
+    if (list) list.textContent = values.length ? collectedText() : 'Пока ничего не собрано. Откройте каталог и полистайте.';
   }
 
   function updateDiagnosticStatus() {
@@ -572,7 +603,7 @@
     (document.head || document.documentElement).appendChild(style);
     const panel = document.createElement('div');
     panel.id = 'pc-panel';
-    panel.innerHTML = '<strong>Сравнение цен</strong><div>Сейчас: ' + STORES[store] + '</div><div id="pc-stats"></div><small>Листайте каталоги. Цены и совпадения нужно проверять.</small><label style="display:block"><input id="pc-enabled" type="checkbox"> Показывать подсказки</label><button id="pc-clear" type="button">Очистить базу</button><details id="pc-diagnostics"><summary>Диагностика</summary><div id="pc-diagnostic-status"></div><small>Журнал содержит названия и цены товаров. Проверьте его перед отправкой.</small><div><button id="pc-report" type="button">Подготовить отчёт</button> <button id="pc-clear-logs" type="button">Очистить журналы</button></div><div id="pc-report-area" hidden><small>Нажмите «Копировать» или выделите текст вручную.</small><textarea id="pc-report-text" readonly aria-label="Отчёт диагностики"></textarea><button id="pc-copy" type="button">Копировать</button><span id="pc-copy-status" role="status"></span></div></details>';
+    panel.innerHTML = '<strong>Сравнение цен</strong><div>Сейчас: ' + STORES[store] + '</div><div id="pc-stats"></div><small>Листайте каталоги. Цены и совпадения нужно проверять.</small><details><summary id="pc-collected-summary">Собранные товары</summary><div id="pc-collected-list" style="white-space:pre-wrap;max-height:180px;overflow-y:auto"></div><button id="pc-copy-collected" type="button">Скопировать список</button><span id="pc-copy-collected-status" role="status"></span></details><label style="display:block"><input id="pc-enabled" type="checkbox"> Показывать подсказки</label><button id="pc-clear" type="button">Очистить базу</button><details id="pc-diagnostics"><summary>Диагностика</summary><div id="pc-diagnostic-status"></div><small>Журнал содержит названия и цены товаров. Проверьте его перед отправкой.</small><div><button id="pc-report" type="button">Подготовить отчёт</button> <button id="pc-clear-logs" type="button">Очистить журналы</button></div><div id="pc-report-area" hidden><small>Нажмите «Копировать» или выделите текст вручную.</small><textarea id="pc-report-text" readonly aria-label="Отчёт диагностики"></textarea><button id="pc-copy" type="button">Копировать</button><span id="pc-copy-status" role="status"></span></div></details>';
     document.body.appendChild(panel);
     const checkbox = panel.querySelector('#pc-enabled');
     checkbox.checked = enabled;
@@ -584,6 +615,16 @@
       scan();
     });
     panel.querySelector('#pc-clear').addEventListener('click', clear);
+    const copyListStatus = panel.querySelector('#pc-copy-collected-status');
+    panel.querySelector('#pc-copy-collected').addEventListener('click', async () => {
+      try {
+        if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error();
+        await navigator.clipboard.writeText(collectedText());
+        copyListStatus.textContent = ' Скопировано — вставьте список в чат (Ctrl+V).';
+      } catch (_) {
+        copyListStatus.textContent = ' Не удалось скопировать. Список виден выше; для отладки пришлите отчёт из «Диагностики».';
+      }
+    });
     panel.querySelector('#pc-clear-logs').addEventListener('click', clearLogs);
     const reportText = panel.querySelector('#pc-report-text');
     const copyStatus = panel.querySelector('#pc-copy-status');

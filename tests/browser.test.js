@@ -41,6 +41,15 @@ test('tabs exchange prices, refresh badges and clear the actual shared database'
   } finally { a.dom.window.close(); b.dom.window.close(); }
 });
 
+test('the panel lists collected offers so the user can inspect and copy them', () => {
+  const db = new Map();
+  const tab = openTab('https://5ka.ru/catalog', 100, db);
+  try {
+    assert.match(tab.w.document.querySelector('#pc-collected-summary').textContent, /Собранные товары: 1/);
+    assert.match(tab.w.document.querySelector('#pc-collected-list').textContent, /Пятёрочка · Молоко Домик 1 л — 100 ₽/);
+  } finally { tab.dom.window.close(); }
+});
+
 test('a card without a product link is stored without a fabricated URL', () => {
   const db = new Map();
   const tab = openTab('https://5ka.ru/catalog', 100, db, null);
