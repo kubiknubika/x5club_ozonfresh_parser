@@ -306,6 +306,14 @@ test('the script starts when body appears after DOMContentLoaded already fired',
   } finally { tab.dom.window.close(); }
 });
 
+test('an SPA urlchange without reload is logged so the tab rescans', () => {
+  const tab = openTab('https://5ka.ru/catalog', 100, new Map());
+  try {
+    tab.w.dispatchEvent(new tab.w.Event('urlchange'));
+    assert.ok(getReport(tab).events.some(event => event.event === 'url_changed'));
+  } finally { tab.dom.window.close(); }
+});
+
 test('restoring a cached page creates a new run after finishing the old one', () => {
   const db = new Map();
   const tab = openTab('https://5ka.ru/catalog', 100, db);

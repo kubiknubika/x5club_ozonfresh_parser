@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Сравнение цен: Пятёрочка, Перекрёсток, Ozon
 // @namespace    x5club-ozonfresh-price-compare
-// @version      1.3.0
+// @version      1.3.1
 // @description  Сохраняет увиденные товары и осторожно сравнивает цены между магазинами
 // @match        https://5ka.ru/*
 // @match        https://*.5ka.ru/*
@@ -15,6 +15,7 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_listValues
+// @grant        window.onurlchange
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
@@ -133,7 +134,7 @@
     perekrestok: '.product-card, [data-testid*="product-card" i], [class*="product-card" i], [class*="ProductCard"]',
     ozon: '.tile-root, [class*="tile-root" i]'
   };
-  const VERSION = '1.3.0';
+  const VERSION = '1.3.1';
   const LOG_FULL = 'pc_log_full_v1:';
   const LOG_ARCHIVE = 'pc_log_archive_v1:';
   const MAX_LOG_BYTES = 256 * 1024; // Estimated UTF-16 bytes, per session.
@@ -614,6 +615,11 @@
       })) schedule();
     }).observe(document.body, { childList: true, subtree: true, characterData: true });
     window.addEventListener('scroll', schedule, { passive: true });
+    // SPA stores change the URL without reloading, and Tampermonkey does not
+    // re-inject then. This already-running copy rescans right away instead of
+    // waiting for the interval. Needs the window.onurlchange grant above and
+    // is a no-op in managers that never fire the event.
+    window.addEventListener('urlchange', () => { logEvent('url_changed', { store }); schedule(); });
     setInterval(scan, INTERVAL);
     scan();
   }
