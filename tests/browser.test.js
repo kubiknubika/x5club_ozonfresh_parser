@@ -101,6 +101,35 @@ test('fallback assembles a deep card whose only action is a button', () => {
   } finally { dom.window.close(); }
 });
 
+test('glued split prices parse on a 5ka-like catalog and header prices seed no cards', () => {
+  const db = new Map();
+  const dom = openCustom(
+    '<header><img alt="Пятёрочка"><a href="/">Главная</a><span>13,0 ₽</span></header>' +
+    '<div class="tile"><a href="/product/tushka"><img alt="Тушка цыпленка Петелинка 1 сорта охлажденная"></a>' +
+    '<div><span>289</span><span>99</span><span>₽</span></div></div>',
+    'https://5ka.ru/catalog', db);
+  try {
+    const offers = [...db.entries()].filter(([key]) => key.startsWith('pc_offer_v1:')).map(([, value]) => value);
+    assert.equal(offers.length, 1);
+    assert.equal(offers[0].name, 'Тушка цыпленка Петелинка 1 сорта охлажденная');
+    assert.equal(offers[0].price, 289.99);
+  } finally { dom.window.close(); }
+});
+
+test('an AggregateOffer lowPrice from JSON-LD is accepted', () => {
+  const tab = openTab('https://5ka.ru/catalog', 123, new Map());
+  try {
+    const json = tab.w.document.createElement('script');
+    json.type = 'application/ld+json';
+    json.textContent = JSON.stringify({ '@type': 'Product', name: 'Масло крестьянское 82,5%', offers: { '@type': 'AggregateOffer', lowPrice: '140', priceCurrency: 'RUB' } });
+    tab.w.document.body.appendChild(json);
+    tab.scan();
+    const report = getReport(tab);
+    assert.equal(report.lastScan.jsonOffers, 1);
+    assert.ok(report.events.some(event => event.event === 'json_offer' && event.price === 140));
+  } finally { tab.dom.window.close(); }
+});
+
 test('the panel lists collected offers so the user can inspect and copy them', () => {
   const db = new Map();
   const tab = openTab('https://5ka.ru/catalog', 100, db);

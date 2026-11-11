@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Сравнение цен: Пятёрочка, Перекрёсток, Ozon
 // @namespace    x5club-ozonfresh-price-compare
-// @version      1.4.2
+// @version      1.4.3
 // @description  Сохраняет увиденные товары и осторожно сравнивает цены между магазинами
 // @match        https://5ka.ru/*
 // @match        https://*.5ka.ru/*
@@ -106,6 +106,11 @@
     return Number.isFinite(value) && value > 0 && value <= 999999 ? value : null;
   }
 
+  function parsePriceText(text) {
+    // A label glued to the amount ("Цена28999 ₽") is not part of the price.
+    return parsePrice(String(text == null ? '' : text).replace(/^(?:цена|стоимость)\s*:?\s*/i, ''));
+  }
+
   function validBarcode(value) {
     const code = String(value || '').trim();
     if (!/^(?:\d{8}|\d{12,14})$/.test(code)) return null;
@@ -161,7 +166,7 @@
     perekrestok: '.product-card, [data-testid*="product-card" i], [class*="product-card" i], [class*="ProductCard"]',
     ozon: '.tile-root, [class*="tile-root" i]'
   };
-  const VERSION = '1.4.2';
+  const VERSION = '1.4.3';
   const LOG_FULL = 'pc_log_full_v1:';
   const LOG_ARCHIVE = 'pc_log_archive_v1:';
   const MAX_LOG_BYTES = 256 * 1024; // Estimated UTF-16 bytes, per session.
@@ -374,17 +379,29 @@
     return null;
   }
 
+  function priceTextOf(el) {
+    // Prices are often built from leaf spans ("289" + "99" + "₽"); glued
+    // textContent would read "28999₽", so join leaf children with spaces.
+    const children = [...el.children];
+    if (children.length >= 2 && children.length <= 6 && children.every(child => !child.children.length)) {
+      const joined = children.map(child => (child.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean).join(' ');
+      if (joined) return joined;
+    }
+    return (el.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
   function priceOf(card, samples) {
     const candidates = [];
     for (const el of card.querySelectorAll('span,div,p,b,strong')) {
       // Prices are often split into ruble/kopeck/currency spans, so a price
       // block may have several children; its full text must still parse below.
       if (el.closest('.pc-badge, #pc-panel') || el.children.length > 6) continue;
-      const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      const rawText = (el.textContent || '').replace(/\s+/g, ' ').trim();
       // Limited raw price-like text helps diagnose markup/format changes.
-      if (text.length <= 80 && /₽|руб/i.test(text) && samples.length < 5 && !samples.includes(text)) samples.push(text);
+      if (rawText.length <= 80 && /₽|руб/i.test(rawText) && samples.length < 5 && !samples.includes(rawText)) samples.push(rawText);
+      const text = priceTextOf(el);
       if (text.length > 35 || (text.match(/₽|руб/gi) || []).length !== 1 || /\/\s*(?:кг|л|100|шт)/i.test(text)) continue;
-      const price = parsePrice(text);
+      const price = parsePriceText(text);
       if (price) candidates.push({ price, el });
     }
     candidates.sort((a, b) => a.price - b.price);
@@ -409,13 +426,19 @@
       // Keep a few raw price-like texts so a report shows the price format of
       // a store whose cards do not assemble yet (Pyaterochka at the moment).
       if (text.length <= 80 && /₽|руб/i.test(text) && stats.fallbackSamples.length < 5 && !stats.fallbackSamples.includes(text)) stats.fallbackSamples.push(text);
+      // Header/nav/footer prices (balance, delivery) are not product prices
+      // and must not seed cards: climbing from them used to "assemble" the
+      // whole page root and price a chicken at the 13 ₽ delivery figure.
+      if (el.closest('header, nav, footer')) continue;
       if (text.length > 35) continue;
       if (/₽|руб/i.test(text)) stats.fallbackCurrencyNodes++;
-      if (!parsePrice(text)) continue;
+      if (!parsePriceText(priceTextOf(el))) continue;
       stats.fallbackParsedPriceNodes++;
       let node = el;
       for (let i = 0; i < 10 && node && node !== document.body; i++, node = node.parentElement) {
         if ((node.textContent.match(/₽/g) || []).length > 4) break;
+        // A real card is compact; a page-sized ancestor is not a card.
+        if ((node.textContent || '').length > 2000 || node.querySelectorAll('img').length > 3) break;
         // Clickable cards may have a button instead of a product link.
         if (node.querySelector('img') && node.querySelector('a[href], button')) { found.add(node); break; }
       }
@@ -498,7 +521,8 @@
         const items = Array.isArray(obj.offers) ? obj.offers : [obj.offers];
         for (const item of items) {
           if (!item || typeof item !== 'object' || (item.priceCurrency && item.priceCurrency !== 'RUB')) continue;
-          const price = parsePrice(item.price, false);
+          // AggregateOffer carries lowPrice instead of price (seen on 5ka product pages).
+          const price = parsePrice(item.price != null ? item.price : item.lowPrice, false);
           if (price) {
             stats.jsonOffers++;
             const result = saveOffer({ name: obj.name, price, url: item.url || obj.url || location.href, barcode: obj.gtin13 || obj.gtin || obj.ean });
