@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Сравнение цен: Пятёрочка, Перекрёсток, Ozon
 // @namespace    x5club-ozonfresh-price-compare
-// @version      1.4.0
+// @version      1.4.1
 // @description  Сохраняет увиденные товары и осторожно сравнивает цены между магазинами
 // @match        https://5ka.ru/*
 // @match        https://*.5ka.ru/*
@@ -39,6 +39,11 @@
   const MULTI_RE_G = new RegExp(MULTI_RE.source, 'gi');
   const SINGLE_RE_G = new RegExp(SINGLE_RE.source, 'gi');
   const RANGE_RE_G = new RegExp(RANGE_RE.source, 'gi');
+
+  // Promo labels are not product names, however title-like their markup is:
+  // installment captions ("0% до 140 дней") and marketing badges.
+  const PROMO_NAME_RE = /\d+(?:[.,]\d+)?%\s*(?:до|на)\s*\d+\s*(?:дней|дня|мес)|рассроч|без переплат|оплатить позже|цена что надо/i;
+  function isPromoName(text) { return PROMO_NAME_RE.test(String(text || '')); }
 
   function toMeasure(n, unit) {
     if (!Number.isFinite(n) || n <= 0) return null;
@@ -156,7 +161,7 @@
     perekrestok: '.product-card, [data-testid*="product-card" i], [class*="product-card" i], [class*="ProductCard"]',
     ozon: '.tile-root, [class*="tile-root" i]'
   };
-  const VERSION = '1.4.0';
+  const VERSION = '1.4.1';
   const LOG_FULL = 'pc_log_full_v1:';
   const LOG_ARCHIVE = 'pc_log_archive_v1:';
   const MAX_LOG_BYTES = 256 * 1024; // Estimated UTF-16 bytes, per session.
@@ -329,7 +334,7 @@
   }
 
   function saveOffer(data) {
-    if (!data.name || !data.price || analyze(data.name).tokens.length < 2) return 'rejected';
+    if (!data.name || !data.price || isPromoName(data.name) || analyze(data.name).tokens.length < 2) return 'rejected';
     const offer = { store, name: data.name, price: data.price, url: safeProductUrl(data.url), barcode: validBarcode(data.barcode), ts: Date.now() };
     // Independent records prevent an unrelated tab from overwriting the entire DB.
     const key = PREFIX + store + ':' + encodeURIComponent(offer.url || offer.name);
@@ -340,17 +345,31 @@
     return 'saved';
   }
 
+  function usableName(text) {
+    return !!text && text.length >= 4 && text.length <= 180 && !/₽/.test(text) &&
+      !/^(в корзину|купить|акция|скидка|новинка)$/i.test(text) && !isPromoName(text);
+  }
   function nameOf(card) {
     const selector = '[data-testid*="title" i], [data-testid*="name" i], [class*="title" i], [class*="name" i], a[title], img[alt]';
+    const candidates = [];
     for (const el of card.querySelectorAll(selector)) {
       if (el.closest('.pc-badge')) continue;
       const text = (el.getAttribute('title') || el.getAttribute('alt') || el.textContent || '').replace(/\s+/g, ' ').trim();
-      if (text.length >= 4 && text.length <= 180 && !/₽|^(в корзину|купить|акция|скидка|новинка)$/i.test(text)) return text;
+      if (usableName(text)) candidates.push({ text, el });
+    }
+    if (candidates.length) {
+      // A product title is (inside) a product link; an installment caption or
+      // a badge is not. Among unlinked candidates the longest text wins: real
+      // titles are longer than labels. First-in-DOM used to pick the promo.
+      const linked = candidates.find(candidate => candidate.el.closest('a[href]'));
+      if (linked) return linked.text;
+      candidates.sort((a, b) => b.text.length - a.text.length);
+      return candidates[0].text;
     }
     for (const el of card.querySelectorAll('a[href]')) {
       if (el.closest('.pc-badge')) continue;
       const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-      if (text.length >= 4 && text.length <= 180 && !/₽|^(в корзину|купить|акция|скидка|новинка)$/i.test(text)) return text;
+      if (usableName(text)) return text;
     }
     return null;
   }
@@ -358,7 +377,9 @@
   function priceOf(card, samples) {
     const candidates = [];
     for (const el of card.querySelectorAll('span,div,p,b,strong')) {
-      if (el.closest('.pc-badge, #pc-panel') || el.children.length > 2) continue;
+      // Prices are often split into ruble/kopeck/currency spans, so a price
+      // block may have several children; its full text must still parse below.
+      if (el.closest('.pc-badge, #pc-panel') || el.children.length > 6) continue;
       const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
       // Limited raw price-like text helps diagnose markup/format changes.
       if (text.length <= 80 && /₽|руб/i.test(text) && samples.length < 5 && !samples.includes(text)) samples.push(text);

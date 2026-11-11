@@ -41,6 +41,34 @@ test('tabs exchange prices, refresh badges and clear the actual shared database'
   } finally { a.dom.window.close(); b.dom.window.close(); }
 });
 
+test('an Ozon installment caption is not mistaken for the product name', () => {
+  const db = new Map();
+  const dom = openCustom(
+    '<div class="tile-root"><div class="finance-name">0% до 140 дней</div>' +
+    '<a href="/product/146950238"><img alt="Голень куриная 0,9-1 кг, Петелинка, охлажденная"></a>' +
+    '<span>389 ₽</span></div>',
+    'https://www.ozon.ru/category/myaso/', db);
+  try {
+    const offers = [...db.entries()].filter(([key]) => key.startsWith('pc_offer_v1:')).map(([, value]) => value);
+    assert.equal(offers.length, 1);
+    assert.equal(offers[0].name, 'Голень куриная 0,9-1 кг, Петелинка, охлажденная');
+    assert.equal(offers[0].price, 389);
+  } finally { dom.window.close(); }
+});
+
+test('a price split into ruble, kopeck and currency spans is still parsed', () => {
+  const db = new Map();
+  const dom = openCustom(
+    '<article class="product-card"><a href="/product/golen"><img alt="Голень куриная Троекурово охлаждённая, 900г"></a>' +
+    '<div class="price"><span>406</span> <span>99</span> <span>₽</span></div></article>',
+    'https://www.perekrestok.ru/catalog', db);
+  try {
+    const offers = [...db.entries()].filter(([key]) => key.startsWith('pc_offer_v1:')).map(([, value]) => value);
+    assert.equal(offers.length, 1);
+    assert.equal(offers[0].price, 406.99);
+  } finally { dom.window.close(); }
+});
+
 test('the panel lists collected offers so the user can inspect and copy them', () => {
   const db = new Map();
   const tab = openTab('https://5ka.ru/catalog', 100, db);
@@ -59,6 +87,19 @@ test('a card without a product link is stored without a fabricated URL', () => {
     assert.equal(offer.url, null);
   } finally { tab.dom.window.close(); }
 });
+
+function openCustom(html, url, db) {
+  const dom = new JSDOM(`<!doctype html><html><head></head><body>${html}</body></html>`, { url, runScripts: 'outside-only' });
+  const w = dom.window;
+  w.GM_getValue = (key, fallback) => db.has(key) ? db.get(key) : fallback;
+  w.GM_setValue = (key, value) => db.set(key, structuredClone(value));
+  w.GM_deleteValue = key => db.delete(key);
+  w.GM_listValues = () => [...db.keys()];
+  w.setInterval = () => 1;
+  w.confirm = () => true;
+  w.eval(script);
+  return dom;
+}
 
 function getReport(tab) {
   tab.w.document.querySelector('#pc-report').click();
